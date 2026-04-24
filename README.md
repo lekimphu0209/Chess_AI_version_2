@@ -1,25 +1,22 @@
-> **Phiên bản:** 1.0 | **Thuật toán:** Minimax (không Alpha-Beta) | **UI:** Flask + chess.svg
+> **Phiên bản:** 2.0 | **Thuật toán:** Minimax + Alpha-Beta (có thể bật/tắt bằng `USE_ALPHA_BETA`) | **UI:** Flask + chess.svg
 
 ---
 
 ## 1. Kiến trúc thư mục
+```text
 chess_ai/
-│
 ├── main.py                  # Điểm khởi chạy duy nhất: khởi tạo ClickToMoveUI và gọi run()
-│
 ├── ai/
-│   ├── init.py
+│   ├── __init__.py
 │   └── minimax.py           # Thuật toán tìm kiếm: minimax() + get_best_move()
-│
 ├── game/
-│   ├── init.py
+│   ├── __init__.py
 │   └── game_logic.py        # Hàm đánh giá vị trí: PIECE_VALUES + evaluate()
-│
 ├── ui/
-│   ├── init.py
+│   ├── __init__.py
 │   └── ui.py                # Toàn bộ tầng UI: Flask server + HTML/CSS/JS + GameState
-│
-└── requirements.txt         # Phụ thuộc: chess, flask
+└── requirements.txt         # Danh sách phụ thuộc chạy project
+```
 
 | File | Vai trò | Phụ thuộc vào |
 |---|---|---|
@@ -33,24 +30,19 @@ chess_ai/
 ## 2. Pipeline Thuật toán (Backend)
 
 ### Tổng quan luồng xử lý
+```text
 Board State
-│
-▼
-get_best_move(board, depth)
-│
-├─► Duyệt từng nước đi hợp lệ ở tầng gốc (tầng 1)
-│       board.legal_moves → [move_1, move_2, ..., move_n]
-│
-├─► Với mỗi nước đi → gọi minimax(board, depth-1, not is_white)
-│       │
-│       ├─► BASE CASE: depth == 0 hoặc game_over
-│       │       └─► evaluate(board) → trả về điểm số nguyên
-│       │
-│       └─► RECURSIVE CASE:
-│               ├─► MAX node (lượt Trắng): chọn max() trong tất cả nhánh con
-│               └─► MIN node (lượt Đen):  chọn min() trong tất cả nhánh con
-│
-└─► Trả về: (best_move, best_score, nodes_visited, elapsed)
+  -> get_best_move(board, depth)
+      -> Duyệt từng nước đi hợp lệ ở tầng gốc
+          board.legal_moves -> [move_1, move_2, ..., move_n]
+    -> Với mỗi nước đi: gọi minimax_ab(...) hoặc minimax(...) tùy `USE_ALPHA_BETA`
+          -> Base case: depth == 0 hoặc game_over
+              -> evaluate(board) -> trả về điểm số
+          -> Recursive case:
+              -> MAX node (lượt Trắng): chọn max() trên các nhánh con
+              -> MIN node (lượt Đen): chọn min() trên các nhánh con
+  -> Trả về: (best_move, best_score, nodes_visited, elapsed)
+```
 
 ### Mô tả từng bước
 
@@ -86,9 +78,9 @@ Khi `depth == 0` hoặc `board.is_game_over()`, gọi `evaluate(board)` từ `ga
 | 4 | ~810,000 | ~30–90s |
 
 > **Ghi chú:** Branching factor trung bình của cờ vua ~30 nước/lượt.
-> Version 2 sẽ áp dụng Alpha-Beta Pruning để giảm xuống ~√(b^d).
+> Ở code hiện tại, Version 2 đã tích hợp Alpha-Beta Pruning để giảm đáng kể số node duyệt trong thực tế.
 
-### 2.1 Cắt tỉa Alpha-Beta (đề xuất cho V2)
+### 2.1 Cắt tỉa Alpha-Beta (đang dùng ở V2)
 
 Alpha-Beta là tối ưu của Minimax: vẫn cho ra cùng kết quả nước đi tốt nhất,
 nhưng bỏ qua các nhánh chắc chắn không thể cải thiện kết quả hiện tại.
@@ -139,57 +131,39 @@ So sánh độ phức tạp:
 | Minimax thuần | `O(b^d)` | Tăng rất nhanh theo depth |
 | Minimax + Alpha-Beta | `O(b^d)` | Gần `O(b^(d/2))` nếu move ordering tốt |
 
-Checklist tích hợp vào code hiện tại:
+Checklist kiểm tra tích hợp trong code hiện tại:
 
-1. Sửa hàm `minimax()` trong `ai/minimax.py` để nhận thêm `alpha`, `beta`.
-2. Khởi tạo ở tầng gốc với `alpha=-inf`, `beta=+inf`.
-3. Thêm break khi đạt điều kiện cắt tỉa.
-4. Giữ nguyên interface `get_best_move()` để UI không cần đổi.
-5. (Khuyến nghị) Duyệt nước ăn trước, nước chiếu trước để tăng hiệu quả cắt tỉa.
+1. Đã có hàm `minimax_ab()` trong `ai/minimax.py` nhận `alpha`, `beta`.
+2. Đã khởi tạo ở tầng gốc với `alpha=-inf`, `beta=+inf`.
+3. Đã có điều kiện cắt tỉa và `break` ở cả MAX/MIN node.
+4. Interface `get_best_move()` vẫn giữ nguyên để UI tương thích.
+5. Có cờ `USE_ALPHA_BETA` để bật/tắt so sánh giữa V1 và V2.
 
 ---
 
 ## 3. Pipeline Giao diện (Frontend/Interaction)
 
 ### Luồng Click-to-Move hoàn chỉnh
-[Người dùng click chuột lên SVG bàn cờ]
-│
-▼
-handleBoardClick(event)                         ← JavaScript
-│
-├─► Tính tọa độ pixel tương đối trong container (420×420px)
-│       x = event.clientX - rect.left
-│       y = event.clientY - rect.top
-│
-├─► Chuyển pixel → chỉ số cột/hàng (0–7)
-│       col = floor((x - margin) / cell)     margin = 20px (chess.svg)
-│       row = floor((y - margin) / cell)     cell = (420-40)/8 = 47.5px
-│
-├─► Xử lý góc nhìn (flipped)
-│       Trắng: square = (7 - row) * 8 + col
-│       Đen:   square = row * 8 + (7 - col)
-│
-└─► Gọi handleClick(square)
-│
-├─[Bước 1: Chưa chọn quân]──────────────────────────────────────
-│   POST /select { square }
-│       └─► Server kiểm tra: có quân mình không? có nước hợp lệ?
-│       └─► Trả về: { ok, legal_targets[], square_name }
-│   → Lưu selectedSquare, legalTargets vào state JS
-│   → Gọi refreshBoard(selected, legalTargets) để highlight SVG
-│
-└─[Bước 2: Đã chọn quân]──────────────────────────────────────
-├─ Click lại ô cũ → reset state, refreshBoard()
-├─ Click quân mình khác → POST /select { square mới }
-└─ Click ô hợp lệ:
-POST /move { from_sq, to_sq }
-└─► Server: board.push(move), lưu lịch sử
-└─► Trả về: { ok, san, game_over }
-→ refreshBoard()
-→ POST /ai_move  (nếu game chưa kết thúc)
-└─► Server gọi get_best_move(), board.push()
-└─► Trả về: { ok, game_over }
-→ refreshBoard() lần cuối
+1. Người dùng click lên bàn cờ SVG, JavaScript gọi `handleBoardClick(event)`.
+2. JS quy đổi tọa độ pixel sang ô cờ (`square`) theo kích thước `420x420` và trạng thái `flipped`.
+3. JS gọi `handleClick(square)` với 2 trạng thái:
+
+```text
+Bước 1 (chưa chọn quân)
+- POST /select { square }
+- Server kiểm tra quân của người chơi + nước đi hợp lệ
+- Trả về { ok, legal_targets[], square_name }
+- JS lưu selectedSquare, legalTargets và refreshBoard() để highlight
+
+Bước 2 (đã chọn quân)
+- Click lại ô cũ -> bỏ chọn
+- Click quân mình khác -> chọn lại quân mới
+- Click ô hợp lệ -> POST /move { from_sq, to_sq }
+- Server push move + lưu SAN/history
+- JS refreshBoard()
+- Nếu chưa game_over -> POST /ai_move
+- JS refreshBoard() lần cuối
+```
 
 ### Cập nhật DOM sau mỗi refreshBoard()
 
@@ -350,6 +324,12 @@ source .venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
+
+> **Lưu ý đồng bộ:** UI hiện tại dùng Flask. Nếu môi trường chưa có Flask, cài thêm:
+>
+> ```bash
+> pip install flask
+> ```
 
 ### 5.5 Chạy ứng dụng
 
