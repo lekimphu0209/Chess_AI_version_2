@@ -403,3 +403,39 @@ git push -u origin main
 | Font chess symbol | Dùng `chess.svg` của python-chess thay vì Unicode |
 | Flipped board | `chess.svg.board(flipped=True)` + JS tính lại `square` từ pixel |
 | Phong cấp | Mặc định phong Hậu — lọc `m.promotion == chess.QUEEN` |
+
+---
+
+## 8. Tóm tắt thay đổi (Version 2)
+
+### 8.1 Engine (đánh giá + minimax)
+
+- **`game/game_logic.py`**
+  - **`evaluate(board)`**: nâng cấp từ “chỉ material” lên **material + PST + heuristic**.
+  - **PST (Piece-Square Table)**: thêm điểm vị trí cho **Tốt/Mã/Tượng** (ưu tiên trung tâm, quân hoạt động).
+  - **Nhận diện giai đoạn**: phân biệt **khai cuộc / trung cuộc / tàn cuộc** để **đổi trọng số** (phase weights).
+  - **Khai cuộc (development)**:
+    - phạt **mã/tượng chưa phát triển** (còn ở ô xuất phát),
+    - phạt **đi lại cùng 1 quân** trong ~10 ply đầu (replay `board.move_stack` để đếm “token” quân),
+    - thưởng **nhập thành**.
+  - **Kiểm soát trung tâm**: thưởng “chiếm + kiểm soát” các ô **d4/e4/d5/e5**.
+  - **An toàn vua**: phạt vua đứng “giữa bàn” (nặng ở opening/middlegame, nhẹ ở endgame) + phạt nhẹ khi đang bị chiếu.
+
+- **`ai/minimax.py`**
+  - **Alpha-Beta pruning** vẫn giữ nguyên, chữ ký `get_best_move(board, depth)` tương thích UI.
+  - **Move ordering**: sắp nước theo ưu tiên **ăn quân → chiếu → phong cấp → nước thường** để alpha-beta cắt tỉa tốt hơn.
+  - **Anti-loop**: lưu ~10 trạng thái gần nhất (FEN). Nếu nước đi quay về trạng thái đã gặp → **phạt -20cp** (góc nhìn Trắng) để giảm đi qua lại.
+  - **Transposition Table (cache)**:
+    - **Key**: `board.fen()`
+    - **Value**: `(depth, score, flag)` với `flag ∈ {EXACT, LOWERBOUND, UPPERBOUND}`
+    - Mục tiêu: tránh tính lại cùng vị trí, tăng tốc đáng kể ở depth cao.
+  - **Quiescence search**: khi `depth == 0` tiếp tục xét **các nước ăn quân (captures)** để giảm *horizon effect*.
+  - **Random tie-break (bonus)**: nếu nhiều nước có cùng điểm ở root → chọn ngẫu nhiên để bớt “máy móc”.
+  - **Log console**: in `depth`, `nodes`, `score`, `best_move` để debug/benchmark nhanh.
+
+### 8.2 UI/Flask (trải nghiệm người chơi)
+
+- **`ui/ui.py`**
+  - **Phong cấp (promotion)**: UI có popup chọn quân **q/r/b/n** và server nhận `promotion` khi thực hiện `/move`.
+  - **Luồng gọi AI**: dọn các lần gọi `/ai_move` bị trùng để tránh AI đi “nhảy”/lặp bất thường.
+  - **Kết thúc ván khi hòa theo luật**: nếu rơi vào **lặp 3 lần** hoặc **50-move rule** thì đánh dấu `game_over` để không chạy vòng lặp vô hạn.

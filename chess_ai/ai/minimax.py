@@ -1,6 +1,7 @@
 import math
 import time
 import chess
+import random
 
 from game.game_logic import evaluate
 # ── SWITCH CHỌN THUẬT TOÁN ────────────────────────────────────────────────────
@@ -30,6 +31,150 @@ USE_ALPHA_BETA = True
 # Lý do dùng list thay vì int: Python không cho sửa biến int ở scope ngoài trong hàm đệ quy
 nodes_visited = [0]   # Số node đã đi vào (kể cả bị cắt tỉa)
 nodes_pruned  = [0]   # Số node bị cắt tỉa (chỉ có trong V2, luôn 0 ở V1)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# V2 extras: move ordering + transposition table + quiescence + anti-loop
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Transposition Table (TT)
+# - Key: board.fen() theo yêu cầu (bao gồm side to move, castling, ep, halfmove/fullmove)
+# - Value: (depth, score, flag)
+#   - depth: độ sâu đã tính (depth còn lại ở node)
+#   - score: điểm minimax từ góc nhìn Trắng (giống evaluate)
+#   - flag : loại node (EXACT / LOWERBOUND / UPPERBOUND)
+TT = {}
+TT_EXACT = 0
+TT_LOWER = 1
+TT_UPPER = 2
+
+# Giá trị quân cho move ordering (không ảnh hưởng evaluate, chỉ để xếp nước)
+_MV_VAL = {
+    chess.PAWN: 100,
+    chess.KNIGHT: 320,
+    chess.BISHOP: 330,
+    chess.ROOK: 500,
+    chess.QUEEN: 900,
+    chess.KING: 20000,
+}
+
+
+def _recent_fens(board: chess.Board, plies: int = 10) -> set:
+    """
+    Lưu các FEN gần đây (6–10 ply) để phạt nước quay lại thế cờ cũ (anti-loop).
+    Triển khai bằng pop/push để không tạo board copy (nhanh hơn deepcopy).
+    """
+    fens = {board.fen()}
+    popped = []
+    n = min(plies, len(board.move_stack))
+    for _ in range(n):
+        popped.append(board.pop())
+        fens.add(board.fen())
+    for mv in reversed(popped):
+        board.push(mv)
+    return fens
+
+
+def _move_order_key(board: chess.Board, move: chess.Move):
+    """
+    Move ordering (ưu tiên):
+    1) Ăn quân
+    2) Chiếu
+    3) Phong cấp
+    4) Nước thường
+
+    Trả về tuple để sort giảm dần (reverse=True).
+    """
+    is_capture = board.is_capture(move)          # ưu tiên 1: ăn quân
+    gives_check = board.gives_check(move)        # ưu tiên 2: chiếu
+    is_promo = (move.promotion is not None)      # ưu tiên 3: phong cấp
+
+    # Nhóm ưu tiên theo yêu cầu
+    if is_capture:
+        group = 3
+    elif gives_check:
+        group = 2
+    elif is_promo:
+        group = 1
+    else:
+        group = 0
+
+    # Tie-break cho captures: MVV-LVA đơn giản (nạn nhân lớn, quân tấn công nhỏ)
+    capture_score = 0
+    if is_capture:
+        victim = board.piece_at(move.to_square)
+        if victim is None and board.is_en_passant(move):
+            victim_val = _MV_VAL[chess.PAWN]
+        else:
+            victim_val = _MV_VAL.get(victim.piece_type, 0) if victim else 0
+        attacker = board.piece_at(move.from_square)
+        attacker_val = _MV_VAL.get(attacker.piece_type, 0) if attacker else 0
+        capture_score = victim_val - attacker_val
+
+    promo_score = _MV_VAL.get(move.promotion, 0) if is_promo else 0
+
+    return (group, capture_score, promo_score)
+
+
+def _ordered_moves(board: chess.Board):
+    """Trả về list nước đi đã được sắp xếp theo heuristic move ordering."""
+    moves = list(board.legal_moves)
+    # reverse=True: tuple key càng lớn càng được xét trước → alpha-beta cắt tỉa tốt hơn
+    moves.sort(key=lambda m: _move_order_key(board, m), reverse=True)
+    return moves
+
+
+def _quiescence(board: chess.Board, is_maximizing: bool, alpha: float, beta: float) -> int:
+    """
+    Quiescence search: khi hết depth, vẫn xét tiếp các nước ăn quân để giảm horizon effect.
+    Chỉ mở rộng CAPTURES (theo yêu cầu).
+    """
+    nodes_visited[0] += 1
+
+    stand_pat = evaluate(board)  # điểm "đứng yên" nếu không mở rộng nữa
+    if is_maximizing:
+        if stand_pat >= beta:
+            return int(beta)
+        if stand_pat > alpha:
+            alpha = stand_pat
+    else:
+        if stand_pat <= alpha:
+            return int(alpha)
+        if stand_pat < beta:
+            beta = stand_pat
+
+    # Chỉ xét nước ăn quân (captures). Dùng ordering để thử "ăn ngon" trước.
+    moves = [m for m in _ordered_moves(board) if board.is_capture(m)]
+    if not moves:
+        return int(stand_pat)
+
+    if is_maximizing:
+        best = stand_pat
+        for move in moves:
+            board.push(move)
+            score = _quiescence(board, False, alpha, beta)
+            board.pop()
+
+            if score > best:
+                best = score
+            if best > alpha:
+                alpha = best
+            if alpha >= beta:
+                break
+        return int(best)
+    else:
+        best = stand_pat
+        for move in moves:
+            board.push(move)
+            score = _quiescence(board, True, alpha, beta)
+            board.pop()
+
+            if score < best:
+                best = score
+            if best < beta:
+                beta = best
+            if alpha >= beta:
+                break
+        return int(best)
 
 
 def minimax(board: chess.Board, depth: int, is_maximizing: bool) -> int:
@@ -111,6 +256,10 @@ def get_best_move(board: chess.Board, depth: int = 2):
     Trả về:
         tuple: (nước_đi_tốt_nhất, điểm_tốt_nhất, số_node_đã_duyệt, thời_gian)
     """
+    # NOTE:
+    # - Hàm này là phiên bản V1 (minimax thuần).
+    # - Ở cuối file có V2 (alpha-beta) định nghĩa lại `get_best_move()` cùng chữ ký
+    #   để UI không cần đổi gì. Python sẽ dùng định nghĩa SAU CÙNG.
     # Reset bộ đếm
     nodes_visited[0] = 0
     start_time = time.time()  # Bắt đầu đếm giờ
@@ -216,12 +365,36 @@ def minimax_ab(board: chess.Board,
     nodes_visited[0] += 1
 
     # ── Điều kiện dừng ────────────────────────────────────────────
-    # Giống V1: dừng khi đạt độ sâu tối đa hoặc game kết thúc
-    if depth == 0 or board.is_game_over():
+    # - Depth=0: chuyển sang quiescence (xét captures) để giảm horizon effect
+    # - Game over: evaluate() đã xử lý checkmate/draw
+    if depth == 0:
+        # Hết depth: dùng quiescence để tránh "ăn xong bị ăn lại" ngay sau khi dừng
+        return _quiescence(board, is_maximizing, alpha, beta)
+    if board.is_game_over():
         return evaluate(board)
 
+    # ── Transposition Table lookup ────────────────────────────────
+    # Dùng FEN làm key theo yêu cầu.
+    fen = board.fen()  # key TT theo yêu cầu (đơn giản, dễ debug; chậm hơn hash chuyên dụng)
+    tt_entry = TT.get(fen)
+    if tt_entry is not None:
+        tt_depth, tt_score, tt_flag = tt_entry
+        if tt_depth >= depth:
+            # Nếu đã có kết quả ở depth >= hiện tại thì có thể dùng lại ngay
+            if tt_flag == TT_EXACT:
+                return tt_score
+            if tt_flag == TT_LOWER:
+                alpha = max(alpha, tt_score)
+            elif tt_flag == TT_UPPER:
+                beta = min(beta, tt_score)
+            if alpha >= beta:
+                return tt_score
+
     # ── Lấy tất cả nước đi hợp lệ ────────────────────────────────
-    legal_moves = list(board.legal_moves)
+    legal_moves = _ordered_moves(board)  # move ordering: capture > check > promo > quiet
+
+    alpha_orig = alpha  # lưu cửa sổ ban đầu để set TT flag (EXACT/LOWER/UPPER)
+    beta_orig = beta
 
     # ═════════════════════════════════════════════════════════════
     # NHÁNH MAX: Trắng đang đi, muốn điểm CAO NHẤT
@@ -259,6 +432,16 @@ def minimax_ab(board: chess.Board,
                 remaining = len(legal_moves) - legal_moves.index(move) - 1
                 nodes_pruned[0] += remaining  # Ước tính thô (thực tế ít hơn)
                 break  # ← Đây là "beta cutoff" (hay "fail-high")
+
+        # ── TT store ─────────────────────────────────────────────
+        # Flag phụ thuộc vào mối quan hệ với cửa sổ alpha/beta ban đầu.
+        if best_score <= alpha_orig:
+            flag = TT_UPPER
+        elif best_score >= beta_orig:
+            flag = TT_LOWER
+        else:
+            flag = TT_EXACT
+        TT[fen] = (depth, int(best_score), flag)  # store kết quả node vào TT
 
         return best_score
 
@@ -298,6 +481,15 @@ def minimax_ab(board: chess.Board,
                 nodes_pruned[0] += remaining  # Ước tính thô
                 break  # ← Đây là "alpha cutoff" (hay "fail-low")
 
+        # ── TT store ─────────────────────────────────────────────
+        if best_score <= alpha_orig:
+            flag = TT_UPPER
+        elif best_score >= beta_orig:
+            flag = TT_LOWER
+        else:
+            flag = TT_EXACT
+        TT[fen] = (depth, int(best_score), flag)  # store kết quả node vào TT
+
         return best_score
 
 
@@ -325,6 +517,7 @@ def get_best_move(board: chess.Board, depth: int = 2):
     nodes_visited[0] = 0
     nodes_pruned[0]  = 0
     start_time       = time.time()
+    TT.clear()  # TT chỉ sống trong 1 lần tìm kiếm (mỗi lượt), tránh phình bộ nhớ
 
     # ── Xác định AI đang đi màu nào ──────────────────────────────
     # board.turn == chess.WHITE → Trắng đang đến lượt
@@ -336,8 +529,13 @@ def get_best_move(board: chess.Board, depth: int = 2):
     # MIN (Đen)  muốn tối thiểu → khởi tạo +∞
     best_score = -math.inf if is_white else math.inf
 
+    # ── Anti-loop: lưu 6–10 trạng thái gần nhất (FEN) ────────────
+    recent_fens = _recent_fens(board, plies=10)  # 6–10 trạng thái gần nhất để phạt loop
+
     # ── Duyệt tất cả nước đi hợp lệ ở tầng gốc ───────────────────
-    for move in board.legal_moves:
+    best_moves = []
+    moves_root = _ordered_moves(board)  # ordering ở root giúp tìm best_move nhanh hơn
+    for move in moves_root:
 
         # Thực hiện nước đi thử nghiệm
         board.push(move)
@@ -362,6 +560,11 @@ def get_best_move(board: chess.Board, depth: int = 2):
                 not is_white
             )
 
+        # Anti-loop (theo yêu cầu): nếu quay lại FEN gần đây thì phạt -20 (từ góc nhìn Trắng).
+        if board.fen() in recent_fens:
+            # Phạt loop theo yêu cầu: -20cp (góc nhìn Trắng)
+            score += (-20 if is_white else 20)
+
         # Hoàn tác nước đi
         board.pop()
 
@@ -370,12 +573,19 @@ def get_best_move(board: chess.Board, depth: int = 2):
             # Trắng (MAX): chọn nước có điểm CAO nhất
             if score > best_score:
                 best_score = score
-                best_move  = move
+                best_moves = [move]
+            elif score == best_score:
+                best_moves.append(move)
         else:
             # Đen (MIN): chọn nước có điểm THẤP nhất
             if score < best_score:
                 best_score = score
-                best_move  = move
+                best_moves = [move]
+            elif score == best_score:
+                best_moves.append(move)
+
+    # Random tie-break nếu nhiều nước có cùng điểm (bonus)
+    best_move = random.choice(best_moves) if best_moves else None  # tie-break ngẫu nhiên (bonus)
 
     # ── Tính thời gian ────────────────────────────────────────────
     elapsed = time.time() - start_time

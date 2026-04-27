@@ -66,7 +66,7 @@ h2 {
 
 /* ── LEFT: bàn cờ + status ── */
 .left-col {
-    width: 420px;
+    width: 600px;
     max-width: calc(100vw - 32px);
     display: flex;
     flex-direction: column;
@@ -340,6 +340,42 @@ hr { border-color: rgba(15, 23, 42, 0.12); margin: 2px 0; }
 </div><!-- end main-layout -->
 
 <script>
+// Popup chọn quân phong cấp
+function showPromotionDialog(callback) {
+    const dialog = document.createElement('div');
+    dialog.id = 'promotion-dialog';
+    dialog.style.position = 'fixed';
+    dialog.style.left = '0';
+    dialog.style.top = '0';
+    dialog.style.width = '100vw';
+    dialog.style.height = '100vh';
+    dialog.style.background = 'rgba(0,0,0,0.25)';
+    dialog.style.display = 'flex';
+    dialog.style.alignItems = 'center';
+    dialog.style.justifyContent = 'center';
+    dialog.style.zIndex = '9999';
+    dialog.innerHTML = `
+        <div style="background:#fff;padding:24px 32px;border-radius:12px;box-shadow:0 8px 32px #0002;display:flex;flex-direction:column;align-items:center;gap:16px;min-width:220px">
+            <div style="font-size:18px;font-weight:bold;margin-bottom:8px">Chọn quân phong cấp</div>
+            <div style="display:flex;gap:16px;justify-content:center">
+                <button class="promo-btn" data-piece="q" title="Hậu" style="font-size:28px">♕</button>
+                <button class="promo-btn" data-piece="r" title="Xe" style="font-size:28px">♖</button>
+                <button class="promo-btn" data-piece="b" title="Tượng" style="font-size:28px">♗</button>
+                <button class="promo-btn" data-piece="n" title="Mã" style="font-size:28px">♘</button>
+            </div>
+            <div style="font-size:13px;color:#64748b">(Chỉ hiện khi tốt đi đến cuối bàn)</div>
+        </div>
+    `;
+    document.body.appendChild(dialog);
+    dialog.querySelectorAll('.promo-btn').forEach(btn => {
+        btn.onclick = () => {
+            const piece = btn.getAttribute('data-piece');
+            dialog.remove();
+            callback(piece);
+        };
+    });
+}
+
 // ══════════════════════════════════════════════════════════════
 // STATE CLIENT
 // ══════════════════════════════════════════════════════════════
@@ -474,28 +510,44 @@ if (!legalTargets.includes(square)) {
     return;
 }
 
-// ── Thực hiện nước đi ──
 selectedSquare = null;
 legalTargets   = [];
 
-const moveData = await api('/move', { from_sq, to_sq: square });
+// Kiểm tra có phải nước phong cấp không
+const stateData = await api('/state');
+const isWhitePlayer = !stateData.flipped;
+const toRank = Math.floor(square / 8);
+const pieceData = await api('/select', { square: from_sq });
+const isPawn = pieceData.ok && pieceData.own_piece && pieceData.piece_type === 'p';
+const promotionRank = isWhitePlayer ? 7 : 0;
+let promotion = null;
+if (isPawn && (toRank === promotionRank)) {
+    // Hiện popup chọn quân
+    await new Promise(resolve => {
+        showPromotionDialog(sel => {
+            promotion = sel;
+            resolve();
+        });
+    });
+}
+
+const moveData = await api('/move', { from_sq, to_sq: square, promotion });
 if (!moveData.ok) {
-    setStatus('❌ Nước đi lỗi!', 'status-err');
-    await refreshBoard();
-    return;
+        setStatus('❌ Nước đi lỗi!', 'status-err');
+        await refreshBoard();
+        return;
 }
 
 await refreshBoard();
 
 if (moveData.game_over) return;
 
-// ── AI phản hồi ──
 aiThinking = true;
 document.getElementById('ai-spinner').style.display = 'inline-block';
 setStatus('🤖 AI đang tính toán (Minimax)...', 'status-ai');
 
 // Gọi AI qua fetch (server tính xong mới trả về)
-const aiData = await api('/ai_move', {});
+await api('/ai_move', {});
 aiThinking = false;
 document.getElementById('ai-spinner').style.display = 'none';
 
@@ -811,27 +863,36 @@ def select_endpoint():
         'own_piece':   True,
         'legal_targets': targets,
         'square_name': chess.square_name(square).upper(),
+        'piece_type': piece.symbol().lower(),  # 'p','n','b','r','q','k'
     })
 
 
 @app.route('/move', methods=['POST'])
 def move_endpoint():
-    """Thực hiện nước đi người chơi — giữ nguyên logic _handle_click phần push."""
+    """Thực hiện nước đi người chơi — hỗ trợ chọn quân phong cấp."""
     data    = request.json
     from_sq = data['from_sq']
     to_sq   = data['to_sq']
+    promotion = data.get('promotion', None)
 
     if gs.game_over or gs.board.turn != gs.player_color:
         return jsonify({'ok': False})
 
-    # Tìm move object (xử lý phong cấp — giống Colab)
     move = None
     for m in gs.board.legal_moves:
         if m.from_square == from_sq and m.to_square == to_sq:
             if m.promotion:
-                if m.promotion == chess.QUEEN:
-                    move = m
-                    break
+                # Nếu có promotion, kiểm tra loại quân
+                if promotion:
+                    promo_map = {'q': chess.QUEEN, 'r': chess.ROOK, 'b': chess.BISHOP, 'n': chess.KNIGHT}
+                    if m.promotion == promo_map.get(promotion):
+                        move = m
+                        break
+                else:
+                    # Nếu không gửi promotion, mặc định là Hậu
+                    if m.promotion == chess.QUEEN:
+                        move = m
+                        break
             else:
                 move = m
                 break
